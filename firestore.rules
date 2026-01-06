@@ -1,0 +1,107 @@
+/**
+ * This ruleset enforces a strict user-ownership model for a user account system.
+ *
+ * Core Philosophy:
+ * The security model is centered around the principle that users have exclusive control
+ * over their own data. All authorization is derived from the authenticated user's
+ * unique ID (UID), ensuring that no user can access, modify, or even see another
+ * user's information.
+ *
+ * Data Structure:
+ * All user data is stored in a top-level `users` collection. Each user's data
+ * is contained within a document whose ID is the user's Firebase Authentication UID.
+ * This creates a clear and secure path-based ownership structure: `/users/{userId}`.
+ *
+ * Key Security Decisions:
+ * - User Listing Disabled: To protect user privacy and prevent data scraping,
+ *   querying the top-level `users` collection is explicitly forbidden for all clients.
+ * - Self-Creation: A newly authenticated user is permitted to create their own
+ *   user profile document, but only if the document ID matches their UID.
+ * - Strict Ownership: All read, update, and delete operations are restricted
+ *   to the document owner.
+ *
+ * Denormalization for Authorization:
+ * Relational integrity is enforced by denormalizing the user's UID from the path
+ * into the document body itself (in the `id` field). On creation, this rule
+ * verifies that `doc.id == path.userId`. On update, it ensures this `id` field
+ * is immutable, preventing ownership from being transferred. This approach is
+ * fast, secure, and avoids costly lookups.
+ *
+ * Structural Segregation:
+ * The data model uses a single `/users` collection for private user profiles.
+ * This clean separation ensures a uniform security policy applies to all documents
+ * within the path, simplifying the ruleset and enhancing security.
+ */
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions for improved readability and reusability.
+
+    /**
+     * Checks if a user is authenticated.
+     */
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    /**
+     * Checks if the currently authenticated user's UID matches the provided userId.
+     * This is the fundamental check for document ownership.
+     * @param userId The UID to check against the authenticated user.
+     */
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    /**
+     * Checks for ownership on an existing document. Used for update and delete
+     * operations to prevent acting on non-existent data.
+     * @param userId The UID of the document owner.
+     */
+    function isExistingOwner(userId) {
+      return isOwner(userId) && resource != null;
+    }
+
+    /**
+     * On create, validates that the document's internal 'id' field matches the
+     * user's auth UID, enforcing relational integrity between the document and its path.
+     * @param userId The user's UID from the document path.
+     */
+    function hasValidOwnerIdOnCreate(userId) {
+      return request.resource.data.id == userId;
+    }
+
+    /**
+     * On update, ensures the 'id' field, which links the document to a user,
+     * cannot be changed.
+     */
+    function isOwnerIdImmutable() {
+      return request.resource.data.id == resource.data.id;
+    }
+
+
+    /**
+     * @description
+     *   Manages user account documents. Only the authenticated owner of the
+     *   document can read, update, or delete it. Users can create their own
+     *   document. Listing all users is explicitly disallowed.
+     * @path /users/{userId}
+     * @allow
+     *   (create) A newly authenticated user `user123` creates their profile at `/users/user123`.
+     *   (get) Authenticated user `user123` reads their own profile at `/users/user123`.
+     * @deny
+     *   (list) Any user, signed in or not, attempts to query the `/users` collection.
+     *   (get) Authenticated user `user456` attempts to read `/users/user123`.
+     * @principle
+     *   Restricts access to a user's own data tree (Path-Based Ownership).
+     */
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow list: if false;
+      allow create: if isOwner(userId) && hasValidOwnerIdOnCreate(userId);
+      allow update: if isExistingOwner(userId) && isOwnerIdImmutable();
+      allow delete: if isExistingOwner(userId);
+    }
+  }
+}
